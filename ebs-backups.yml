@@ -1,6 +1,6 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Take daily snapshots of EBS volumes that belong to EC2 instances with the Backup:True tag.'
+Description: 'Take daily snapshots of all EBS volumes that belong to EC2 instances. Opt out by tagging the instance with Backup: False.'
 
 Parameters:
   DefaultBackupRetentionDays:
@@ -37,7 +37,7 @@ Resources:
             - Effect: Allow
               Action:
               - logs:*
-              Resource: "arn:aws-us-gov:logs:*:*:*"
+              Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
             - Effect: Allow
               Action:
               - ec2:Describe*
@@ -115,6 +115,17 @@ Resources:
                       snap = ec.create_snapshot(
                           Description='Created By ebs-backups-SnapshotCreationFunction',
                           VolumeId=vol_id,
+                          TagSpecifications=[
+                              {
+                                  'ResourceType': 'snapshot',
+                                  'Tags': [
+                                      {
+                                          'Key': 'Name',
+                                          'Value': instance['InstanceId']
+                                      },
+                                  ]
+                              },
+                          ],
                       )
 
                       to_tag[retention_days].append(snap['SnapshotId'])
@@ -136,6 +147,7 @@ Resources:
 
           if __name__ == '__main__':
               lambda_handler(None, None)
+
 
       Environment:
         Variables:

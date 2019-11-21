@@ -51,6 +51,17 @@ def lambda_handler(event, context):
             snap = ec.create_snapshot(
                 Description='Created By ebs-backups-SnapshotCreationFunction',
                 VolumeId=vol_id,
+                TagSpecifications=[
+                    {
+                        'ResourceType': 'snapshot',
+                        'Tags': [
+                            {
+                                'Key': 'Name',
+                                'Value': instance['InstanceId']
+                            },
+                        ]
+                    },
+                ],
             )
 
             to_tag[retention_days].append(snap['SnapshotId'])

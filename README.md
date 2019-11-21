@@ -15,3 +15,12 @@ The default behavior is to backup all instances. To exclude an instance from bei
 aws ec2 create-tags \
     --resources i-1234567890abcdef0 --tags Key=Backup,Value=False
 ```
+
+### Changing Default Retention
+The default behavior is to retain backups for 14 days. To change the default behavior, update the CFT parameter with a new value.
+To change the individual behavior of a single instance add the following tag.
+
+```shell
+aws ec2 create-tags \
+    --resources i-1234567890abcdef0 --tags Key=Retention,Value=3
+```

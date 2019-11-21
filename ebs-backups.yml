@@ -1,0 +1,221 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Take daily snapshots of EBS volumes that belong to EC2 instances with the Backup:True tag.'
+
+Parameters:
+  DefaultBackupRetentionDays:
+    Description: The default number of days EBS volume snapshots are kept. You can override this per-instance with the Retention tag.
+    Type: String
+    Default: '14'
+
+Resources:
+  SnapshotLambdaIAMRole:
+    Metadata:
+          cfn_nag:
+            rules_to_suppress:
+            - id: F3
+              reason: wildcards are ok for log groups.
+            - id: W11
+              reason: wildcards are ok for log groups.
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: SnapshotIAMRolePolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - logs:*
+              Resource: "arn:aws-us-gov:logs:*:*:*"
+            - Effect: Allow
+              Action:
+              - ec2:Describe*
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - ec2:CreateSnapshot
+              - ec2:DeleteSnapshot
+              - ec2:CreateTags
+              - ec2:ModifySnapshotAttribute
+              - ec2:ResetSnapshotAttribute
+              Resource: "*"
+
+  SnapshotCreationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "A Lambda function that creates snapshots of EBS volumes"
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      Timeout: 900
+      MemorySize: 2048
+      Role: !GetAtt SnapshotLambdaIAMRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import collections
+          import datetime
+
+          DefaultBackupRetentionDays = int(os.environ.get("DefaultBackupRetentionDays"))
+
+          ec = boto3.client('ec2')
+
+
+          def lambda_handler(event, context):
+              """lambda_handler will execute the function in AWS Lambda."""
+              reservations = ec.describe_instances(
+              ).get(
+                  'Reservations', []
+              )
+
+              allinstances = sum(
+                  [
+                      [i for i in r['Instances']]
+                      for r in reservations
+                  ], [])
+              print(f"Found {len(allinstances)} to consider for backing up")
+
+              backup_instances = []
+              to_tag = collections.defaultdict(list)
+              for instance in allinstances:
+
+                  tags = instance["Tags"]
+                  backups = [tag.get('Value') for tag in tags if tag.get('Key') == 'Backup']
+                  backup = backups[0] if backups else None
+                  if backup != 'False':
+                      backup_instances.append(instance)
+
+              for instance in backup_instances:
+                  print(f"Backin up {instance['InstanceId']}")
+
+                  try:
+                      retention_days = [
+                          int(t.get('Value')) for t in instance['Tags']
+                          if t['Key'] == 'Retention'][0]
+                  except IndexError:
+                      retention_days = DefaultBackupRetentionDays
+
+                  for dev in instance['BlockDeviceMappings']:
+                      if dev.get('Ebs', None) is None:
+                          continue
+                      vol_id = dev['Ebs']['VolumeId']
+                      print(f"Found EBS Volume {vol_id} on instance {instance['InstanceId']}")
+
+                      snap = ec.create_snapshot(
+                          Description='Created By ebs-backups-SnapshotCreationFunction',
+                          VolumeId=vol_id,
+                      )
+
+                      to_tag[retention_days].append(snap['SnapshotId'])
+
+                      print(f"Retaining snapshot {snap['SnapshotId']} of volume {vol_id }from instance {instance['InstanceId']} for {retention_days} days")
+
+              for retention_days in list(to_tag.keys()):
+                  delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+                  delete_fmt = delete_date.strftime('%Y-%m-%d')
+                  print(f"Will delete {len(to_tag[retention_days])} snapshots on {delete_fmt}")
+                  ec.create_tags(
+                      Resources=to_tag[retention_days],
+                      Tags=[
+                          {'Key': 'DeleteOn', 'Value': delete_fmt},
+                          {'Key': 'CreatedBy', 'Value': 'ebs-backups-SnapshotCreationFunction'},
+                      ]
+                  )
+
+
+          if __name__ == '__main__':
+              lambda_handler(None, None)
+
+      Environment:
+        Variables:
+          DefaultBackupRetentionDays: !Ref DefaultBackupRetentionDays
+
+  SnapshotCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "A Lambda function that cleans up snapshots at their Retention date"
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      Timeout: 900
+      MemorySize: 2048
+      Role: !GetAtt SnapshotLambdaIAMRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+
+          ec = boto3.client('ec2')
+
+
+          def lambda_handler(event, context):
+              """lambda_handler will execute the function in AWS Lambda."""
+              account_id = context.invoked_function_arn.split(":")[4]
+              account_ids = [account_id]
+
+              delete_on = datetime.date.today().strftime('%Y-%m-%d')
+              filters = [
+                  {'Name': 'tag-key', 'Values': ['DeleteOn']},
+                  {'Name': 'tag-value', 'Values': [delete_on]},
+              ]
+              snapshot_response = ec.describe_snapshots(OwnerIds=account_ids, Filters=filters)
+
+              for snap in snapshot_response['Snapshots']:
+                  print(f"Deleting snapshot {snap['SnapshotId']}.")
+                  ec.delete_snapshot(SnapshotId=snap['SnapshotId'])
+
+
+          if __name__ == '__main__':
+              lambda_handler(None, None)
+
+
+  # Run the snapshot Lambda functions every day
+  SnapshotCreationScheduleRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Run the EBS snapshot creation script daily"
+      Name: "SnapshotCreationScheduleRule"
+      ScheduleExpression: "cron(0 3 * * ? *)"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt SnapshotCreationFunction.Arn
+          Id: 'SnapshotCreationFunction'
+
+  # Permissions to Lambda functions to be run from CloudWatch events
+  PermissionForEventsToInvokeCreationLambda:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref SnapshotCreationFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SnapshotCreationScheduleRule.Arn
+
+  # Run the snapshot Lambda functions every day
+  SnapshotCleanupScheduleRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Run the EBS snapshot cleanup script daily"
+      Name: "SnapshotCleanupScheduleRule"
+      ScheduleExpression: "cron(0 3 * * ? *)"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt SnapshotCleanupFunction.Arn
+          Id: 'SnapshotCleanupFunction'
+
+  PermissionForEventsToInvokeCleanupLambda:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref SnapshotCleanupFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SnapshotCleanupScheduleRule.Arn

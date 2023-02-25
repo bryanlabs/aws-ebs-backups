@@ -5,7 +5,7 @@
 ### Deploy the Cloudformation, and all EC2 instances will be backed up.  
 
 [![Launch Stack](https://cdn.rawgit.com/buildkite/cloudformation-launch-stack-button-svg/master/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=ebs-backups&templateURL=https://bryanlabs-public.s3.amazonaws.com/bryanlabs.net_files/blog/ebs-backups/ebs-backups.yml)  
-[View Source](https://github.com/bryanlabs/ebs-backups/tree/master/ebs-backups.yml)
+[View Source](https://github.com/bryanlabs/aws-ebs-backups/blob/master/ebs-backups.yml)
 
 ### Opting Out
 
